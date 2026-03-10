@@ -312,7 +312,7 @@ void* SRTFcpu(void* param) {
 
         // If there is a process running
         if (p != NULL) {
-            pthread_mutex_lock(&(svars->readyQLock));
+            pthread_mutex_lock(&(svars->readyQLock)); // TODO: Can this MUTEX be put inside the if statement? or do we need it for qShortestBR().
             // Check if there is a shorter process
             int shorterProcessExists = qShortestBR(&(svars->readyQ)) < p->burstRemaining;
 
@@ -379,10 +379,66 @@ void* PPcpu(void* param) {
     int threadNum = ((CpuParams*) param)->threadNumber;
     SharedVars* svars = ((CpuParams*) param)->svars;
 
-    // Process* p = NULL;  // TODO: uncomment when you implement this function
+    Process* p = NULL;
 
     while (1) {
         sem_wait(svars->cpuSems[threadNum]);
+
+        // If there is a process running
+        if (p != NULL) {
+            pthread_mutex_lock(&(svars->readyQLock)); // TODO: Can this MUTEX be put inside the if statement? or do we need it for qGetPriority().
+            // Check if there is a higher priority process
+            int higherPriorityProcessExists = qGetPriority(&(svars->readyQ)) < p->priority;
+
+            if (higherPriorityProcessExists) {
+                // Put the current process back into the readyQ so the higher priority one can be scheduled
+                p->requeued = true;
+                qInsert(&(svars->readyQ), p);
+                p = NULL;
+            } // else let the process stay running
+
+            pthread_mutex_unlock(&(svars->readyQLock));
+        }
+
+
+        // ── Selection (only when idle) ───────────────────────────────────
+        // RR is based on quanta. It will run for a set time before moving to next
+        // process.
+        if (p == NULL) {
+            // Lock readyQ before inspecting or modifying it — another CPU
+            // thread (or main inserting a new arrival) could touch it right now.
+            pthread_mutex_lock(&(svars->readyQLock));
+
+            // Run the next item in the readyQ
+            p = qRemove(&(svars->readyQ), qPriority(&(svars->readyQ)));
+
+            if (p == NULL) {
+                // readyQ was empty — CPU stays idle this tick.
+                printf("No process to schedule\n");
+            } else {
+                printf("Scheduling PID %d\n", p->PID);
+            }
+
+            pthread_mutex_unlock(&(svars->readyQLock));
+        }
+
+        // ── Execution: one unit of work ──────────────────────────────────
+        // If we have a process (carried over from a prior tick or just
+        // selected above), burn one unit of its remaining CPU burst.
+        if (p != NULL) {
+            p->burstRemaining--;
+
+            if (p->burstRemaining == 0) {
+                // Process is done — move it to finishedQ so main can
+                // compute and print wait-time statistics at simulation end.
+                pthread_mutex_lock(&(svars->finishedQLock));
+                qInsert(&(svars->finishedQ), p);
+                pthread_mutex_unlock(&(svars->finishedQLock));
+
+                // CPU is now idle; it will select a new process next tick.
+                p = NULL;
+            }
+        }
 
         sem_post(svars->mainSem);
     }
